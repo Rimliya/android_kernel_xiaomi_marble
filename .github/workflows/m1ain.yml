@@ -19,18 +19,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bc bison flex libelf-dev libssl-dev ccache
           sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+          sudo apt-get install -y device-tree-compiler  # 添加DTB编译工具
 
       - name: Set up Clang Toolchain
         run: |
           git clone --depth=1 https://gitlab.com/ElectroPerf/atom-x-clang.git clang
-
-      - name: Debug toolchain setup
-        run: |
-          echo "Clang version:"
-          clang/bin/clang --version
-          echo "ld.lld version:"
-          clang/bin/ld.lld --version
-          echo "PATH: $PATH"
 
       - name: Compile Kernel
         env:
@@ -38,7 +31,7 @@ jobs:
           CLANG_PATH: ${{ github.workspace }}/clang/bin
           DEFCONFIG: marble_defconfig
         run: |
-          set -e  # 出错时立即退出
+          set -e
           export PATH=$CLANG_PATH:/usr/bin:$PATH
           export REAL_CROSS_COMPILE=aarch64-linux-gnu-
           
@@ -54,7 +47,7 @@ jobs:
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=$REAL_CROSS_COMPILE
 
-          # 编译阶段
+          # 编译阶段 - 添加DTB编译
           make -j$(nproc) O=out LLVM=1 LLVM_IAS=1 \
             CC=clang \
             LD=ld.lld \
@@ -64,22 +57,29 @@ jobs:
             OBJDUMP=llvm-objdump \
             STRIP=llvm-strip \
             CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=$REAL_CROSS_COMPILE
+            CROSS_COMPILE=$REAL_CROSS_COMPILE \
+            Image.gz-dtb  # 明确指定目标为Image.gz-dtb
 
-          # 验证输出文件存在
+          # 验证输出
           echo "编译完成，检查输出文件:"
           ls -la out/arch/arm64/boot/
           if [ ! -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
-            echo "错误: Image.gz-dtb 文件未生成!"
-            echo "可能的编译日志:"
-            cat out/build.log || true
-            exit 1
+            echo "尝试手动创建Image.gz-dtb..."
+            cd out/arch/arm64/boot
+            cat Image.gz dts/*.dtb > Image.gz-dtb
+            cd -
+            if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
+              echo "手动创建Image.gz-dtb成功!"
+            else
+              echo "错误: Image.gz-dtb 文件未生成!"
+              exit 1
+            fi
           fi
 
       - name: Pack with AnyKernel3
         run: |
           git clone https://github.com/osm0sis/AnyKernel3
-          cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/ || { echo "复制内核镜像失败"; exit 1; }
+          cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
           cd AnyKernel3
           sed -i 's/device.name1=.*/device.name1=marble/' anykernel.sh
           zip -r9 kernel_marble.zip *
