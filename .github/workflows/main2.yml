@@ -1,0 +1,205 @@
+name: Build Melt Kernel for Marble-2
+
+on:
+  push:
+    branches:
+      - melt-rebase # 确保这是你希望编译的正确分支
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  build_kernel:
+    name: Build Android Kernel (marble)
+    runs-on: ubuntu-latest
+    env: # ジョブ全体で利用可能な環境変数を定義
+      KERNEL_REPO_URL: https://github.com/Pzqqt/android_kernel_xiaomi_marble # ここにカーネルリポジトリのURL
+      KERNEL_BRANCH: main # カーネルリポジトリのブランチ (適宜変更)
+      DEFCONFIG: marble_defconfig # 使用するdefconfigファイル名
+      CLANG_VERSION: "17.0.6" # 使用するClangのバージョン
+      KBUILD_BUILD_USER: GitHubUser
+      KBUILD_BUILD_HOST: GitHubActions
+
+    steps:
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.KERNEL_REPO_URL }} # フォークまたは直接指定
+          ref: ${{ env.KERNEL_BRANCH }}
+          path: kernel # ソースコードを 'kernel' ディレクトリにチェックアウト
+          # submodules: 'recursive' # サブモジュールも再帰的にチェックアウト (もしあれば)
+          # depth: 1 # 最新のコミットのみ取得 (ビルド時間に影響)
+
+      - name: Install Build Dependencies
+        run: |
+          echo "Installing build dependencies..."
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            bc build-essential ccache clang cpio curl flex bison git kmod \
+            libelf-dev libncurses-dev libssl-dev lld llvm python3 rsync \
+            wget xz-utils zstd device-tree-compiler dwarves patchelf \
+            openssl ca-certificates zip unzip
+          echo "Dependencies installed."
+
+      - name: Download and Setup Clang Toolchain
+        run: |
+          CLANG_RELEASE_TAG="llvmorg-${CLANG_VERSION}"
+          CLANG_FILE="clang+llvm-${CLANG_VERSION}-x86_64-linux-gnu-ubuntu-22.04.tar.xz"
+          CLANG_URL="https://github.com/llvm/llvm-project/releases/download/${CLANG_RELEASE_TAG}/${CLANG_FILE}"
+
+          echo "Downloading Clang from ${CLANG_URL}"
+          wget -q -O "${CLANG_FILE}" "${CLANG_URL}"
+          
+          echo "Extracting Clang..."
+          mkdir -p $GITHUB_WORKSPACE/clang-toolchain
+          tar -xf "${CLANG_FILE}" -C $GITHUB_WORKSPACE/clang-toolchain --strip-components=1
+          rm "${CLANG_FILE}"
+
+          echo "Adding Clang to PATH..."
+          echo "$GITHUB_WORKSPACE/clang-toolchain/bin" >> $GITHUB_PATH
+          echo "Clang setup complete."
+        shell: bash
+
+      - name: Verify Clang Installation
+        run: |
+          clang --version
+          ld.lld --version
+
+      - name: Set Build Environment Variables
+        run: |
+          echo "Setting build environment variables..."
+          echo "ARCH=arm64" >> $GITHUB_ENV
+          echo "SUBARCH=arm64" >> $GITHUB_ENV
+          echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
+          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
+          echo "CC=clang" >> $GITHUB_ENV
+          echo "LD=ld.lld" >> $GITHUB_ENV
+          echo "AR=llvm-ar" >> $GITHUB_ENV
+          echo "NM=llvm-nm" >> $GITHUB_ENV
+          echo "OBJCOPY=llvm-objcopy" >> $GITHUB_ENV
+          echo "OBJDUMP=llvm-objdump" >> $GITHUB_ENV
+          echo "STRIP=llvm-strip" >> $GITHUB_ENV
+          echo "KERNEL_DIR=${GITHUB_WORKSPACE}/kernel" >> $GITHUB_ENV
+          echo "OUT_DIR=${GITHUB_WORKSPACE}/out" >> $GITHUB_ENV
+          echo "CCACHE_DIR=${GITHUB_WORKSPACE}/.ccache" >> $GITHUB_ENV
+          echo "USE_CCACHE=1" >> $GITHUB_ENV
+          echo "Variables set."
+        shell: bash
+
+      - name: Configure ccache
+        run: |
+          echo "Configuring ccache..."
+          mkdir -p ${{ env.CCACHE_DIR }}
+          ccache -M 15G # キャッシュの最大サイズを設定 (例: 15GB)
+          ccache -o compression=true # 圧縮を有効化
+          ccache -z   # 統計情報をリセット
+          echo "ccache configured."
+
+      - name: Load ccache from cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ runner.os }}-ccache-clang${{ env.CLANG_VERSION }}-${{ env.DEFCONFIG }}-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-clang${{ env.CLANG_VERSION }}-${{ env.DEFCONFIG }}-${{ github.ref }}-
+            ${{ runner.os }}-ccache-clang${{ env.CLANG_VERSION }}-${{ env.DEFCONFIG }}-
+
+      - name: Prepare Kernel Configuration (defconfig)
+        working-directory: ${{ env.KERNEL_DIR }}
+        run: |
+          echo "Preparing kernel configuration (${{ env.DEFCONFIG }})..."
+          mkdir -p ${{ env.OUT_DIR }}
+          make O=${{ env.OUT_DIR }} \
+            ARCH=${{ env.ARCH }} \
+            SUBARCH=${{ env.SUBARCH }} \
+            CLANG_TRIPLE=${{ env.CLANG_TRIPLE }} \
+            CROSS_COMPILE=${{ env.CROSS_COMPILE }} \
+            CC=${{ env.CC }} \
+            LD=${{ env.LD }} \
+            AR=${{ env.AR }} \
+            NM=${{ env.NM }} \
+            OBJCOPY=${{ env.OBJCOPY }} \
+            OBJDUMP=${{ env.OBJDUMP }} \
+            STRIP=${{ env.STRIP }} \
+            ${{ env.DEFCONFIG }}
+          echo "Kernel configuration prepared."
+        shell: bash
+
+      - name: Compile Kernel
+        working-directory: ${{ env.KERNEL_DIR }}
+        run: |
+          echo "Compiling kernel..."
+          # ccache を make コマンドに明示的に渡す必要は通常ありません。
+          # 環境変数 USE_CCACHE=1 と CCACHE_DIR、そして clang が ccache を認識するように PATH が設定されていれば十分です。
+          # もしカーネルの Makefile が CC="ccache clang" のような指定を期待する場合は調整してください。
+          make O=${{ env.OUT_DIR }} \
+            ARCH=${{ env.ARCH }} \
+            SUBARCH=${{ env.SUBARCH }} \
+            CLANG_TRIPLE=${{ env.CLANG_TRIPLE }} \
+            CROSS_COMPILE=${{ env.CROSS_COMPILE }} \
+            CC=${{ env.CC }} \
+            LD=${{ env.LD }} \
+            AR=${{ env.AR }} \
+            NM=${{ env.NM }} \
+            OBJCOPY=${{ env.OBJCOPY }} \
+            OBJDUMP=${{ env.OBJDUMP }} \
+            STRIP=${{ env.STRIP }} \
+            -j$(nproc)
+          echo "Kernel compilation finished."
+        shell: bash
+
+      - name: Prepare and Package Artifacts
+        run: |
+          echo "Packaging artifacts..."
+          ARTIFACT_STAGING_DIR=$GITHUB_WORKSPACE/artifacts
+          mkdir -p ${ARTIFACT_STAGING_DIR}
+          
+          OUT_BOOT_DIR=${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot
+          KERNEL_IMAGE_NAME=""
+
+          if [ -f "${OUT_BOOT_DIR}/Image.gz" ]; then
+            cp "${OUT_BOOT_DIR}/Image.gz" "${ARTIFACT_STAGING_DIR}/Image.gz"
+            KERNEL_IMAGE_NAME="Image.gz"
+          elif [ -f "${OUT_BOOT_DIR}/Image" ]; then
+            cp "${OUT_BOOT_DIR}/Image" "${ARTIFACT_STAGING_DIR}/Image"
+            KERNEL_IMAGE_NAME="Image"
+          else
+            echo "Error: Kernel Image (Image or Image.gz) not found in ${OUT_BOOT_DIR}!"
+            # exit 1 # 必要に応じてビルド失敗
+          fi
+          echo "Kernel image: ${KERNEL_IMAGE_NAME} packaged."
+
+          if [ -f "${OUT_BOOT_DIR}/dtbo.img" ]; then
+            cp "${OUT_BOOT_DIR}/dtbo.img" "${ARTIFACT_STAGING_DIR}/dtbo.img"
+            echo "dtbo.img packaged."
+          else
+            echo "Warning: dtbo.img not found in ${OUT_BOOT_DIR}."
+          fi
+
+          # 特定のDTBファイルやディレクトリをコピー
+          DTS_PATHS=(
+            "${OUT_BOOT_DIR}/dts/vendor/qcom"
+            "${OUT_BOOT_DIR}/dts/qcom"
+            "${OUT_BOOT_DIR}/dts/xiaomi"
+            "${OUT_BOOT_DIR}/dts/vendor" # より一般的なパス
+          )
+          for dts_path in "${DTS_PATHS[@]}"; do
+            if [ -d "${dts_path}" ]; then
+              find "${dts_path}" -name "*.dtb" -exec cp --parents {} "${ARTIFACT_STAGING_DIR}/" \;
+              echo "DTBs from ${dts_path} packaged."
+            fi
+          done
+          
+          # 成果物をZIPファイルにまとめる
+          cd ${ARTIFACT_STAGING_DIR}
+          ZIP_NAME="kernel-output-${{ env.DEFCONFIG }}-${{ github.run_id }}.zip"
+          zip -r9 $GITHUB_WORKSPACE/${ZIP_NAME} .
+          echo "Artifacts zipped into ${ZIP_NAME}"
+          echo "ZIP_NAME_ENV=${ZIP_NAME}" >> $GITHUB_ENV # 後続ステップでファイル名を使用するため
+        shell: bash
+
+      - name: Upload Kernel Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME_ENV || format('kernel-output-{0}-{1}', env.DEFCONFIG, github.run_id) }}
+          path: $GITHUB_WORKSPACE/${{ env.ZIP_NAME_ENV || format('kernel-output-{0}-{1}.zip', env.DEFCONFIG, github.run_id) }}
+          if-no-files-found: error # ファイルが見つからない場合はエラーにする
+          retention-days: 7 # 成果物を7日間保持
