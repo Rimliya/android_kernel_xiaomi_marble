@@ -47,7 +47,7 @@ jobs:
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=$REAL_CROSS_COMPILE
 
-          # 编译内核镜像和设备树分开进行
+          # 编译内核镜像和设备树
           make -j$(nproc) O=out LLVM=1 LLVM_IAS=1 \
             CC=clang \
             LD=ld.lld \
@@ -72,10 +72,17 @@ jobs:
             CROSS_COMPILE=$REAL_CROSS_COMPILE \
             dtbs
 
-          # 手动创建Image.gz-dtb
+          # 手动创建Image.gz-dtb - 使用正确的设备树路径
           echo "手动创建Image.gz-dtb..."
           cd out/arch/arm64/boot
-          cat Image.gz dts/*.dtb > Image.gz-dtb
+          
+          # 查找所有设备树文件并组合它们
+          find dts -name '*.dtb' -print0 | xargs -0 cat > dtb_combined
+          
+          # 组合内核和设备树
+          cat Image.gz dtb_combined > Image.gz-dtb
+          rm dtb_combined  # 清理临时文件
+          
           cd -
           
           # 验证输出
@@ -99,3 +106,9 @@ jobs:
         with:
           name: kernel_marble
           path: AnyKernel3/kernel_marble.zip
+
+      - name: Debug DTB locations
+        run: |
+          echo "设备树文件位置:"
+          find out/arch/arm64/boot -name "*.dtb"
+          echo "设备树文件总数: $(find out/arch/arm64/boot -name "*.dtb" | wc -l)"
