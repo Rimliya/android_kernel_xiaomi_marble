@@ -63,27 +63,26 @@ jobs:
         run: |
           mkdir -p $GITHUB_WORKSPACE/out
           
-          # 设置所有环境变量
-          cat <<EOF >> $GITHUB_ENV
-          ARCH=arm64
-          SUBARCH=arm64
-          CROSS_COMPILE=aarch64-linux-gnu-
-          CLANG_TRIPLE=aarch64-linux-gnu-
-          CC=clang
-          LD=ld.lld
-          AR=llvm-ar
-          NM=llvm-nm
-          OBJCOPY=llvm-objcopy
-          OBJDUMP=llvm-objdump
-          STRIP=llvm-strip
-          KERNEL_DIR=$GITHUB_WORKSPACE/kernel_source
-          OUT_DIR=$GITHUB_WORKSPACE/out
-          KBUILD_BUILD_USER=GitHubActions
-          KBUILD_BUILD_HOST=CI-Server
-          CCACHE_DIR=$GITHUB_WORKSPACE/.ccache
-          # 添加Clang特定标志（针对Android内核）
-          CLANG_FLAGS="-Qunused-arguments -fno-addrsig"
-          EOF
+          # 设置所有环境变量（不含注释）
+          echo "ARCH=arm64" >> $GITHUB_ENV
+          echo "SUBARCH=arm64" >> $GITHUB_ENV
+          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
+          echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
+          echo "CC=clang" >> $GITHUB_ENV
+          echo "LD=ld.lld" >> $GITHUB_ENV
+          echo "AR=llvm-ar" >> $GITHUB_ENV
+          echo "NM=llvm-nm" >> $GITHUB_ENV
+          echo "OBJCOPY=llvm-objcopy" >> $GITHUB_ENV
+          echo "OBJDUMP=llvm-objdump" >> $GITHUB_ENV
+          echo "STRIP=llvm-strip" >> $GITHUB_ENV
+          echo "KERNEL_DIR=$GITHUB_WORKSPACE/kernel_source" >> $GITHUB_ENV
+          echo "OUT_DIR=$GITHUB_WORKSPACE/out" >> $GITHUB_ENV
+          echo "KBUILD_BUILD_USER=GitHubActions" >> $GITHUB_ENV
+          echo "KBUILD_BUILD_HOST=CI-Server" >> $GITHUB_ENV
+          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> $GITHUB_ENV
+          
+          # Clang 特定标志（针对 Android 内核）
+          echo "CLANG_FLAGS=-Qunused-arguments -fno-addrsig" >> $GITHUB_ENV
           
           ccache --max-size=2G
 
@@ -94,7 +93,7 @@ jobs:
           make O=$OUT_DIR mrproper
           make O=$OUT_DIR marble_defconfig
           
-          # 可选：添加Clang 17特定配置
+          # 添加 Clang 17 特定配置
           ./scripts/config --file $OUT_DIR/.config \
             -e LTO_CLANG_THIN \
             -e THINLTO \
@@ -104,7 +103,7 @@ jobs:
         run: |
           cd $KERNEL_DIR
           
-          # 添加Clang 17特定编译标志
+          # 添加 Clang 17 编译标志
           EXTRA_CFLAGS="-mllvm -polly -mllvm -polly-vectorizer=stripmine"
           
           time make O=$OUT_DIR -j$(nproc --all) \
@@ -139,7 +138,7 @@ jobs:
           # 复制主要产物
           cp $OUT_DIR/arch/arm64/boot/Image.gz-dtb $RELEASE_DIR/
           
-          # 复制所有DTB文件
+          # 复制所有 DTB 文件
           find $OUT_DIR/arch/arm64/boot/dts -name "*.dtb" -exec cp {} $RELEASE_DIR/ \;
           
           # 复制模块
