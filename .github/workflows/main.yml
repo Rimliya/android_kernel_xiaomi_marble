@@ -4,23 +4,22 @@ on:
   push:
     branches:
       - melt-rebase
-  workflow_dispatch: # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   build_kernel:
     name: Compile Melt Kernel (marble)
-    runs-on: ubuntu-latest
-    timeout-minutes: 120 # 增加超时时间确保编译完成
+    runs-on: ubuntu-22.04  # 明确使用 22.04
+    timeout-minutes: 120
 
     steps:
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
         with:
-          # 确保使用正确的仓库地址
           repository: Pzqqt/android_kernel_xiaomi_marble
-          ref: melt-rebase  # 指定分支
+          ref: melt-rebase
           path: kernel_source
-          fetch-depth: 0    # 获取完整历史（某些内核需要）
+          fetch-depth: 0
 
       - name: Install Build Dependencies
         run: |
@@ -29,119 +28,105 @@ jobs:
             bc bison build-essential ccache curl flex \
             g++-multilib gcc-multilib git gnupg gperf \
             libelf-dev libffi-dev liblz4-tool \
-            libncurses5 libncurses5-dev libsdl1.2-dev \
+            libncurses-dev \  # 关键修复：使用 libncurses-dev 替代 libncurses5
+            libsdl1.2-dev \
             libssl-dev libxml2 libxml2-utils llvm lld clang \
             lzop pngcrush python3 python3-pip rsync schedtool \
             squashfs-tools xsltproc zip zlib1g-dev \
             device-tree-compiler \
-            gcc-aarch64-linux-gnu  # 交叉编译工具链
-          
-          # 安装必要Python模块
+            gcc-aarch64-linux-gnu \
+            libtinfo5  # 添加缺失的兼容库
+
+          # 安装必要 Python 模块
           pip3 install pycryptodome
 
       - name: Setup Clang Toolchain
         run: |
-          # 使用项目推荐的Clang版本（14.0.6）
           CLANG_VERSION="14.0.6"
           CLANG_ARCHIVE="clang+llvm-${CLANG_VERSION}-x86_64-linux-gnu-ubuntu-18.04.tar.xz"
           
           wget -q "https://github.com/llvm/llvm-project/releases/download/llvmorg-${CLANG_VERSION}/${CLANG_ARCHIVE}"
           
-          # 解压到永久目录
           sudo mkdir -p /usr/local/clang-llvm
           sudo tar -xf ${CLANG_ARCHIVE} -C /usr/local/clang-llvm --strip-components=1
           
-          # 添加到系统PATH
           echo "/usr/local/clang-llvm/bin" | sudo tee -a /etc/environment
           echo "LD_LIBRARY_PATH=/usr/local/clang-llvm/lib:$LD_LIBRARY_PATH" | sudo tee -a /etc/environment
           
-          # 验证安装
           /usr/local/clang-llvm/bin/clang --version
 
       - name: Prepare Build Environment
         run: |
-          # 创建输出目录
           mkdir -p $GITHUB_WORKSPACE/out
           
-          # 设置环境变量
-          echo "ARCH=arm64" >> $GITHUB_ENV
-          echo "SUBARCH=arm64" >> $GITHUB_ENV
-          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
-          echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
-          echo "CC=clang" >> $GITHUB_ENV
-          echo "LD=ld.lld" >> $GITHUB_ENV
-          echo "AR=llvm-ar" >> $GITHUB_ENV
-          echo "NM=llvm-nm" >> $GITHUB_ENV
-          echo "OBJCOPY=llvm-objcopy" >> $GITHUB_ENV
-          echo "OBJDUMP=llvm-objdump" >> $GITHUB_ENV
-          echo "STRIP=llvm-strip" >> $GITHUB_ENV
-          echo "PATH=/usr/local/clang-llvm/bin:$PATH" >> $GITHUB_ENV
-          echo "KERNEL_DIR=$GITHUB_WORKSPACE/kernel_source" >> $GITHUB_ENV
-          echo "OUT_DIR=$GITHUB_WORKSPACE/out" >> $GITHUB_ENV
+          # 设置所有环境变量
+          cat <<EOF >> $GITHUB_ENV
+          ARCH=arm64
+          SUBARCH=arm64
+          CROSS_COMPILE=aarch64-linux-gnu-
+          CLANG_TRIPLE=aarch64-linux-gnu-
+          CC=clang
+          LD=ld.lld
+          AR=llvm-ar
+          NM=llvm-nm
+          OBJCOPY=llvm-objcopy
+          OBJDUMP=llvm-objdump
+          STRIP=llvm-strip
+          PATH=/usr/local/clang-llvm/bin:$PATH
+          KERNEL_DIR=$GITHUB_WORKSPACE/kernel_source
+          OUT_DIR=$GITHUB_WORKSPACE/out
+          KBUILD_BUILD_USER=GitHubActions
+          KBUILD_BUILD_HOST=CI-Server
+          CCACHE_DIR=$GITHUB_WORKSPACE/.ccache
+          EOF
           
-          # 设置内核构建标识
-          echo "KBUILD_BUILD_USER=GitHubActions" >> $GITHUB_ENV
-          echo "KBUILD_BUILD_HOST=CI-Server" >> $GITHUB_ENV
-          
-          # 启用ccache加速编译
-          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> $GITHUB_ENV
           ccache --max-size=2G
 
       - name: Apply Defconfig
         run: |
           cd $KERNEL_DIR
-          
-          # 清理构建环境
           make O=$OUT_DIR clean
           make O=$OUT_DIR mrproper
-          
-          # 应用设备配置
           make O=$OUT_DIR marble_defconfig
-          
-          # 可选：修改配置
-          ./scripts/config --file $OUT_DIR/.config \
-            -e CONFIG_DEBUG_INFO \
-            -d CONFIG_DEBUG_INFO_REDUCED
 
       - name: Compile Kernel
         run: |
           cd $KERNEL_DIR
-          
-          # 开始编译（使用全部核心）
           time make O=$OUT_DIR -j$(nproc --all) 2>&1 | tee build.log
           
-          # 检查产物
-          ls -lh $OUT_DIR/arch/arm64/boot/
+          # 验证核心产物存在
+          if [ ! -f "$OUT_DIR/arch/arm64/boot/Image.gz-dtb" ]; then
+            echo "❌ 核心镜像未生成，编译失败！"
+            tail -n 100 build.log
+            exit 1
+          fi
           
-          # 保存编译日志
-          echo "Build log:"
-          tail -n 50 build.log
+          echo "✅ 编译成功！产物大小:"
+          ls -lh $OUT_DIR/arch/arm64/boot/Image.gz-dtb
 
       - name: Package Artifacts
         run: |
-          # 创建发布目录
-          RELEASE_DIR="$GITHUB_WORKSPACE/release_${{ github.run_id }}"
+          RELEASE_DIR="$GITHUB_WORKSPACE/release"
           mkdir -p $RELEASE_DIR
           
-          # 复制核心镜像
+          # 复制主要产物
           cp $OUT_DIR/arch/arm64/boot/Image.gz-dtb $RELEASE_DIR/
           
-          # 复制模块（如果有）
-          find $OUT_DIR -name "*.ko" -exec cp {} $RELEASE_DIR/ \;
-          
-          # 复制dtbo和dtb
-          cp $OUT_DIR/arch/arm64/boot/dtbo.img $RELEASE_DIR/ 2>/dev/null || true
-          cp $OUT_DIR/arch/arm64/boot/dts/qcom/marble.dtb $RELEASE_DIR/ 2>/dev/null || true
+          # 尝试复制其他可能存在的文件
+          [ -f "$OUT_DIR/arch/arm64/boot/dtbo.img" ] && cp $OUT_DIR/arch/arm64/boot/dtbo.img $RELEASE_DIR/
+          [ -f "$OUT_DIR/arch/arm64/boot/dts/vendor/qcom/marble.dtb" ] && \
+            cp $OUT_DIR/arch/arm64/boot/dts/vendor/qcom/marble.dtb $RELEASE_DIR/
           
           # 复制调试文件
           cp $OUT_DIR/vmlinux $RELEASE_DIR/
           cp $OUT_DIR/.config $RELEASE_DIR/
           
-          echo "Artifacts ready at: $RELEASE_DIR"
+          echo "📦 打包完成:"
+          ls -lh $RELEASE_DIR
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: MeltKernel-marble-${{ github.run_id }}
-          path: $GITHUB_WORKSPACE/release_${{ github.run_id }}
+          path: $GITHUB_WORKSPACE/release
           retention-days: 7
