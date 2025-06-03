@@ -11,7 +11,7 @@ jobs:
     name: Build Android Kernel (marble)
     runs-on: ubuntu-latest
     env: # ジョブ全体で利用可能な環境変数を定義
-      KERNEL_REPO_URL: https://github.com/Pzqqt/android_kernel_xiaomi_marble # ここにカーネルリポジトリのURL
+      KERNEL_REPO_URL: https://github.com/Rimliya/android_kernel_xiaomi_marble # ここにカーネルリポジトリのURL
       KERNEL_BRANCH: main # カーネルリポジトリのブランチ (適宜変更)
       DEFCONFIG: marble_defconfig # 使用するdefconfigファイル名
       CLANG_VERSION: "17.0.6" # 使用するClangのバージョン
