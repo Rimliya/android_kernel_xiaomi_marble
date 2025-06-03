@@ -1,161 +1,143 @@
-name: Build Melt Kernel for Marble (Clang 17)
+name: Build Melt Kernel (marble) with Clang 17
 
 on:
   push:
     branches:
-      - melt-rebase
-  workflow_dispatch:
+      - melt-rebase # 监控 Pzqqt/android_kernel_xiaomi_marble 的 melt-rebase 分支
+  workflow_dispatch: # 允许手动触发
+
+env:
+  ARCH: arm64
+  KERNEL_REPO_URL: https://github.com/Pzqqt/android_kernel_xiaomi_marble.git
+  KERNEL_BRANCH: melt-rebase # 或特定 commit/tag
+  DEFCONFIG_NAME: marble_defconfig # 假设 defconfig 位于 arch/arm64/configs/marble_defconfig
+  CLANG_VERSION: 17
+  OUTPUT_ARTIFACT_NAME: melt kernel-test
+  CROSS_COMPILE: aarch64-linux-gnu-
+  CROSS_COMPILE_ARM32: arm-linux-gnueabi- # 如果内核需要编译32位组件
 
 jobs:
   build_kernel:
-    name: Compile Melt Kernel (marble)
-    runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    name: Build Kernel for ${{ env.ARCH }} with Clang ${{ env.CLANG_VERSION }}
+    runs-on: ubuntu-latest # 使用最新的 Ubuntu 运行器
+    permissions:
+      contents: read # 允许读取仓库内容
 
     steps:
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
         with:
-          repository: Pzqqt/android_kernel_xiaomi_marble
-          ref: melt-rebase
-          path: kernel_source
-          fetch-depth: 0
+          repository: ${{ env.KERNEL_REPO_URL }}
+          ref: ${{ env.KERNEL_BRANCH }}
+          fetch-depth: 1 # 浅克隆，加快检出速度
 
-      - name: Install Build Dependencies
+      - name: Install Build Dependencies and Clang ${{ env.CLANG_VERSION }}
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y \
-            bc bison build-essential ccache curl flex \
-            git gnupg gperf \
-            libelf-dev libffi-dev liblz4-tool \
-            libncurses-dev \
-            libssl-dev libxml2 libxml2-utils \
-            llvm lld lzop python3 python3-pip \
-            rsync squashfs-tools zip zlib1g-dev \
-            device-tree-compiler \
-            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            gcc g++  # 关键：安装原生gcc用于配置阶段
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ccache \
+            curl flex g++-multilib gcc-multilib git gnupg gperf \
+            libelf-dev liblz4-tool libncurses5-dev libncurses5 \
+            libssl-dev make \
+            python3 python3-pip \
+            device-tree-compiler wget xz-utils zip \
+            llvm lld # 基础包，llvm.sh 会安装特定版本
           
-          pip3 install pycryptodome
+          # Install Clang and LLVM tools using llvm.sh
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo./llvm.sh ${{ env.CLANG_VERSION }} all
+          sudo rm llvm.sh
 
-      - name: Setup Clang 17 Toolchain
-        run: |
-          CLANG_VERSION="17.0.6"
-          ARCHIVE_NAME="clang+llvm-${CLANG_VERSION}-x86_64-linux-gnu-ubuntu-22.04.tar.xz"
-          
-          # 使用官方下载源
-          wget -q --tries=3 --timeout=30 \
-            "https://github.com/llvm/llvm-project/releases/download/llvmorg-${CLANG_VERSION}/${ARCHIVE_NAME}"
-          
-          # 安装到工作目录
-          mkdir -p clang-17
-          tar -xf "${ARCHIVE_NAME}" -C clang-17 --strip-components=1
-          
-          # 设置环境变量
-          echo "$(pwd)/clang-17/bin" >> $GITHUB_PATH
-          echo "LD_LIBRARY_PATH=$(pwd)/clang-17/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
-          
-          # 验证安装
-          clang-17/bin/clang --version
+          # Verify Clang installation
+          clang-${{ env.CLANG_VERSION }} --version
+          echo "Clang path: $(which clang-${{ env.CLANG_VERSION }})"
 
-      - name: Prepare Build Environment
+      - name: Add Clang to PATH and Set Environment Variables
         run: |
-          mkdir -p $GITHUB_WORKSPACE/out
-          
-          # 设置所有环境变量
-          echo "ARCH=arm64" >> $GITHUB_ENV
-          echo "SUBARCH=arm64" >> $GITHUB_ENV
-          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
-          echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> $GITHUB_ENV
-          echo "CC=clang" >> $GITHUB_ENV
+          echo "/usr/lib/llvm-${{ env.CLANG_VERSION }}/bin" >> $GITHUB_PATH
+          echo "CC=clang" >> $GITHUB_ENV # Kbuild 将使用 PATH 中的 clang (应为 clang-17)
           echo "LD=ld.lld" >> $GITHUB_ENV
           echo "AR=llvm-ar" >> $GITHUB_ENV
           echo "NM=llvm-nm" >> $GITHUB_ENV
           echo "OBJCOPY=llvm-objcopy" >> $GITHUB_ENV
           echo "OBJDUMP=llvm-objdump" >> $GITHUB_ENV
           echo "STRIP=llvm-strip" >> $GITHUB_ENV
-          echo "KERNEL_DIR=$GITHUB_WORKSPACE/kernel_source" >> $GITHUB_ENV
-          echo "OUT_DIR=$GITHUB_WORKSPACE/out" >> $GITHUB_ENV
-          echo "KBUILD_BUILD_USER=GitHubActions" >> $GITHUB_ENV
-          echo "KBUILD_BUILD_HOST=CI-Server" >> $GITHUB_ENV
-          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> $GITHUB_ENV
-          
-          # 关键修复：移除会导致配置阶段失败的Clang标志
-          # echo "CLANG_FLAGS=-Qunused-arguments -fno-addrsig" >> $GITHUB_ENV
-          
-          ccache --max-size=2G
+          echo "HOSTCC=clang" >> $GITHUB_ENV
+          echo "HOSTCXX=clang++" >> $GITHUB_ENV
+          echo "LLVM=1" >> $GITHUB_ENV
+          echo "LLVM_IAS=1" >> $GITHUB_ENV
+          # 确保 ccache 在 PATH 中 (如果已安装)
+          echo "/usr/lib/ccache" >> $GITHUB_PATH
 
-      - name: Apply Defconfig with GCC
+      - name: Configure ccache (Optional)
         run: |
-          cd $KERNEL_DIR
-          
-          # 关键修复：配置阶段使用原生GCC
-          make O=$OUT_DIR clean
-          make O=$OUT_DIR mrproper
-          
-          # 临时使用GCC进行配置
-          make O=$OUT_DIR CC=gcc HOSTCC=gcc marble_defconfig
-          
-          # 添加Clang特定配置（配置完成后）
-          ./scripts/config --file $OUT_DIR/.config \
-            -e LTO_CLANG_THIN \
-            -e THINLTO \
-            -d LTO_NONE
+          ccache -M 10G # 设置 ccache 最大缓存大小
+          ccache -z   # 清零统计数据
 
-      - name: Compile Kernel with Clang 17
+      - name: Prepare Kernel Configuration
+        working-directory: ${{ github.workspace }}
         run: |
-          cd $KERNEL_DIR
-          
-          # 添加Clang优化标志（仅在编译阶段）
-          EXTRA_CFLAGS="-Qunused-arguments -fno-addrsig -mllvm -polly -mllvm -polly-vectorizer=stripmine"
-          
-          time make O=$OUT_DIR -j$(nproc --all) \
-            CC="$CC" \
-            LD="$LD" \
-            AR="$AR" \
-            NM="$NM" \
-            OBJCOPY="$OBJCOPY" \
-            OBJDUMP="$OBJDUMP" \
-            STRIP="$STRIP" \
-            EXTRA_CFLAGS="$EXTRA_CFLAGS" \
-            2>&1 | tee build.log
-          
-          # 验证核心产物存在
-          if [ ! -f "$OUT_DIR/arch/arm64/boot/Image.gz-dtb" ]; then
-            echo "❌ 核心镜像未生成，编译失败！"
-            echo "=== 编译日志最后100行 ==="
-            tail -n 100 build.log
-            echo "========================="
+          make O=out mrproper
+          make O=out ARCH=${{ env.ARCH }} ${{ env.DEFCONFIG_NAME }}
+
+      - name: Compile Kernel
+        working-directory: ${{ github.workspace }}
+        run: |
+          # 使用 ccache (如果可用)
+          # Kbuild 会自动检测 ccache (如果 clang 前缀是 ccache clang)
+          # 或者通过 export CC="ccache clang"
+          # 这里我们依赖 Kbuild 对 PATH 中 ccache 的检测
+          make O=out ARCH=${{ env.ARCH }} \
+            CLANG_TRIPLE=${{ env.CROSS_COMPILE }} \
+            CROSS_COMPILE=${{ env.CROSS_COMPILE }} \
+            CROSS_COMPILE_ARM32=${{ env.CROSS_COMPILE_ARM32 }} \
+            -j$(nproc --all)
+
+      - name: Determine Kernel Image Name
+        id: kernel_image
+        working-directory: ${{ github.workspace }}/out/arch/${{ env.ARCH }}/boot
+        run: |
+          if [ -f Image.lz4 ]; then
+            echo "name=Image.lz4" >> $GITHUB_OUTPUT
+          elif [ -f Image.gz ]; then
+            echo "name=Image.gz" >> $GITHUB_OUTPUT
+          elif [ -f Image ]; then
+            echo "name=Image" >> $GITHUB_OUTPUT
+          else
+            echo "Kernel image not found!"
             exit 1
           fi
-          
-          echo "✅ 编译成功！产物大小:"
-          ls -lh $OUT_DIR/arch/arm64/boot/Image.gz-dtb
+          echo "Found kernel image: ${{ steps.kernel_image.outputs.name }}"
 
-      - name: Package Artifacts
+      - name: Package Kernel Artifacts
+        working-directory: ${{ github.workspace }}
         run: |
-          RELEASE_DIR="$GITHUB_WORKSPACE/release"
-          mkdir -p $RELEASE_DIR
+          mkdir -p kernel_artifact
+          cp out/arch/${{ env.ARCH }}/boot/${{ steps.kernel_image.outputs.name }} kernel_artifact/${{ steps.kernel_image.outputs.name }}
+          if; then
+            cp out/arch/${{ env.ARCH }}/boot/dtbo.img kernel_artifact/dtbo.img
+          fi
+          # 复制所有生成的 dtb 文件 (通常在 dts 子目录中)
+          find out/arch/${{ env.ARCH }}/boot/dts/ -name "*.dtb" -exec cp {} kernel_artifact/ \;
+          cp out/.config kernel_artifact/kernel_config.txt # 保存本次编译的配置
+          # 可选：复制 vmlinux 和 System.map
+          cp out/vmlinux kernel_artifact/vmlinux
+          cp out/System.map kernel_artifact/System.map
           
-          # 复制主要产物
-          cp $OUT_DIR/arch/arm64/boot/Image.gz-dtb $RELEASE_DIR/
-          
-          # 复制所有DTB文件
-          find $OUT_DIR/arch/arm64/boot/dts -name "*.dtb" -exec cp {} $RELEASE_DIR/ \;
-          
-          # 复制模块
-          find $OUT_DIR -name "*.ko" -exec cp {} $RELEASE_DIR/ \;
-          
-          # 复制调试文件
-          cp $OUT_DIR/vmlinux $RELEASE_DIR/
-          cp $OUT_DIR/.config $RELEASE_DIR/
-          
-          echo "📦 打包完成:"
-          ls -lh $RELEASE_DIR
+          cd kernel_artifact
+          zip -r9 ${{ github.workspace }}/${{ env.OUTPUT_ARTIFACT_NAME }}.zip.
+          cd..
 
-      - name: Upload Artifacts
+      - name: Upload Kernel Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MeltKernel-marble-Clang17-${{ github.run_id }}
-          path: $GITHUB_WORKSPACE/release
-          retention-days: 7
+          name: ${{ env.OUTPUT_ARTIFACT_NAME }}
+          path: ${{ github.workspace }}/${{ env.OUTPUT_ARTIFACT_NAME }}.zip
+          if-no-files-found: error # 如果文件未找到则报错
+          retention-days: 7 # 产物保留天数
+
+      - name: Display ccache statistics (Optional)
+        if: always() # 总是运行，即使之前的步骤失败
+        run: |
+          ccache -s
