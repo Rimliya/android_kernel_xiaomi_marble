@@ -1,0 +1,55 @@
+name: Android Kernel Builder
+
+on:
+  workflow_dispatch:  # 手动触发
+  push:
+    branches: [ melt-rebase ] # 代码更新时自动触发
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive  # 确保子模块（如工具链）被拉取
+
+      - name: Set up build environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex libelf-dev libssl-dev ccache
+
+      - name: Set up Clang Toolchain
+        run: |
+          git clone --depth=1 https://gitlab.com/ElectroPerf/atom-x-clang.git clang
+
+      - name: Compile Kernel
+        env:
+          ARCH: arm64
+          CLANG_PATH: ${{ github.workspace }}/clang/bin
+          CROSS_COMPILE: aarch64-linux-gnu-
+          DEFCONFIG: marble_defconfig  # 替换为你的配置文件名称
+        run: |
+          export PATH=$CLANG_PATH:$PATH
+          make O=out $DEFCONFIG
+          make -j$(nproc) O=out \
+            CC="clang" \
+            LD="ld.lld" \
+            AR="llvm-ar" \
+            NM="llvm-nm" \
+            CLANG_TRIPLE="aarch64-linux-gnu-" \
+            CROSS_COMPILE="$CROSS_COMPILE"
+
+      - name: Pack with AnyKernel3
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3
+          cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+          cd AnyKernel3
+          sed -i 's/device.name1=.*/device.name1=marble/' anykernel.sh  # 设备代号匹配
+          zip -r9 kernel_marble.zip *
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel_marble
+          path: AnyKernel3/kernel_marble.zip
