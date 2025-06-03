@@ -1,0 +1,148 @@
+name: Build Melt Kernel for Marble
+
+on:
+  push:
+    branches:
+      - melt-rebase # 确保这是你希望编译的正确分支
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  build_kernel:
+    name: Compile Melt Kernel (marble)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          path: kernel_source
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            ccache \
+            curl \
+            flex \
+            g++-multilib \
+            gcc-multilib \
+            git \
+            gnupg \
+            gperf \
+            libelf-dev \
+            libffi-dev \
+            liblz4-tool \
+            libncurses5 \
+            libncurses5-dev \
+            libncurses-dev \
+            libsdl1.2-dev \
+            libssl-dev \
+            libxml2 \
+            libxml2-utils \
+            llvm \
+            lld \
+            clang \
+            lzop \
+            pngcrush \
+            python3 \
+            python3-pip \
+            rsync \
+            schedtool \
+            squashfs-tools \
+            xsltproc \
+            zip \
+            zlib1g-dev \
+            device-tree-compiler \
+            gcc-aarch64-linux-gnu
+
+      - name: Setup Clang Toolchain
+        run: |
+          CLANG_VERSION="14.0.6"
+          CLANG_BASE_URL="https://github.com/llvm/llvm-project/releases/download/llvmorg-${CLANG_VERSION}"
+          CLANG_ARCHIVE="clang+llvm-${CLANG_VERSION}-x86_64-linux-gnu-ubuntu-18.04.tar.xz"
+          
+          echo "Downloading Clang from ${CLANG_BASE_URL}/${CLANG_ARCHIVE}"
+          wget -q ${CLANG_BASE_URL}/${CLANG_ARCHIVE}
+          
+          echo "Extracting Clang..."
+          mkdir -p $HOME/clang-llvm
+          tar -xf ${CLANG_ARCHIVE} -C $HOME/clang-llvm --strip-components=1
+          
+          echo "Adding Clang to PATH..."
+          echo "$HOME/clang-llvm/bin" >> $GITHUB_PATH
+          
+          echo "Verifying Clang version:"
+          clang --version
+
+      - name: Set Build Environment Variables and Apply Defconfig
+        env:
+          ARCH: arm64
+          SUBARCH: arm64
+          CROSS_COMPILE: aarch64-linux-gnu-
+          CLANG_TRIPLE: aarch64-linux-gnu-
+          CC: clang
+          LD: ld.lld
+          AR: llvm-ar
+          NM: llvm-nm
+          OBJCOPY: llvm-objcopy
+          OBJDUMP: llvm-objdump
+          STRIP: llvm-strip
+          KBUILD_BUILD_USER: "Rimliya" # 替换为你的 GitHub 用户名
+          KBUILD_BUILD_HOST: "GitHubActions"
+          KERNEL_DIR: ${{ github.workspace }}/kernel_source
+          OUT_DIR: ${{ github.workspace }}/out
+        run: |
+          echo "Kernel source directory: $KERNEL_DIR"
+          echo "Output directory: $OUT_DIR"
+          
+          cd $KERNEL_DIR
+          
+          echo "Creating output directory..."
+          mkdir -p $OUT_DIR
+          
+          echo "Applying marble_defconfig..."
+          make O=$OUT_DIR marble_defconfig
+          
+          echo "Defconfig applied. Current.config head:"
+          head $OUT_DIR/.config
+
+      - name: Compile Kernel
+        env:
+          ARCH: arm64
+          SUBARCH: arm64
+          CROSS_COMPILE: aarch64-linux-gnu-
+          CLANG_TRIPLE: aarch64-linux-gnu-
+          CC: clang
+          LD: ld.lld
+          AR: llvm-ar
+          NM: llvm-nm
+          OBJCOPY: llvm-objcopy
+          OBJDUMP: llvm-objdump
+          STRIP: llvm-strip
+          KBUILD_BUILD_USER: "Rimliya" # 替换为你的 GitHub 用户名
+          KBUILD_BUILD_HOST: "GitHubActions"
+          KERNEL_DIR: ${{ github.workspace }}/kernel_source
+          OUT_DIR: ${{ github.workspace }}/out
+        run: |
+          cd $KERNEL_DIR
+          echo "Starting kernel compilation..."
+          make O=$OUT_DIR -j$(nproc --all)
+          
+          echo "Kernel compilation finished."
+          ls -lh $OUT_DIR/arch/arm64/boot/
+
+      - name: Package Kernel and Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: MeltKernel-marble-${{ github.run_id }}-${{ github.sha }}
+          path: |
+            ${{ env.OUT_DIR }}/arch/arm64/boot/Image
+            ${{ env.OUT_DIR }}/arch/arm64/boot/dtbo.img
+            ${{ env.OUT_DIR }}/arch/arm64/boot/dts/qcom/marble.dtb # 再次确认此路径是否准确
+            ${{ env.OUT_DIR }}/.config
+            ${{ env.OUT_DIR }}/vmlinux
+          if-no-files-found: error
