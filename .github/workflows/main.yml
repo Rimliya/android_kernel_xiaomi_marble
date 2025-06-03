@@ -33,20 +33,19 @@ jobs:
             llvm lld lzop python3 python3-pip \
             rsync squashfs-tools zip zlib1g-dev \
             device-tree-compiler \
-            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            gcc g++  # 关键：安装原生gcc用于配置阶段
           
           pip3 install pycryptodome
 
       - name: Setup Clang 17 Toolchain
         run: |
-          # 使用 Clang 17.0.6 (最新稳定版)
           CLANG_VERSION="17.0.6"
           ARCHIVE_NAME="clang+llvm-${CLANG_VERSION}-x86_64-linux-gnu-ubuntu-22.04.tar.xz"
           
-          # 从清华镜像下载（更快更可靠）
-          MIRROR_URL="https://mirrors.tuna.tsinghua.edu.cn/github-release/llvm/llvm-project/LatestRelease"
-          wget -q --tries=3 --timeout=30 "${MIRROR_URL}/${ARCHIVE_NAME}" || \
-          wget -q --tries=3 --timeout=30 "https://github.com/llvm/llvm-project/releases/download/llvmorg-${CLANG_VERSION}/${ARCHIVE_NAME}"
+          # 使用官方下载源
+          wget -q --tries=3 --timeout=30 \
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-${CLANG_VERSION}/${ARCHIVE_NAME}"
           
           # 安装到工作目录
           mkdir -p clang-17
@@ -63,7 +62,7 @@ jobs:
         run: |
           mkdir -p $GITHUB_WORKSPACE/out
           
-          # 设置所有环境变量（不含注释）
+          # 设置所有环境变量
           echo "ARCH=arm64" >> $GITHUB_ENV
           echo "SUBARCH=arm64" >> $GITHUB_ENV
           echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
@@ -81,19 +80,23 @@ jobs:
           echo "KBUILD_BUILD_HOST=CI-Server" >> $GITHUB_ENV
           echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> $GITHUB_ENV
           
-          # Clang 特定标志（针对 Android 内核）
-          echo "CLANG_FLAGS=-Qunused-arguments -fno-addrsig" >> $GITHUB_ENV
+          # 关键修复：移除会导致配置阶段失败的Clang标志
+          # echo "CLANG_FLAGS=-Qunused-arguments -fno-addrsig" >> $GITHUB_ENV
           
           ccache --max-size=2G
 
-      - name: Apply Defconfig
+      - name: Apply Defconfig with GCC
         run: |
           cd $KERNEL_DIR
+          
+          # 关键修复：配置阶段使用原生GCC
           make O=$OUT_DIR clean
           make O=$OUT_DIR mrproper
-          make O=$OUT_DIR marble_defconfig
           
-          # 添加 Clang 17 特定配置
+          # 临时使用GCC进行配置
+          make O=$OUT_DIR CC=gcc HOSTCC=gcc marble_defconfig
+          
+          # 添加Clang特定配置（配置完成后）
           ./scripts/config --file $OUT_DIR/.config \
             -e LTO_CLANG_THIN \
             -e THINLTO \
@@ -103,8 +106,8 @@ jobs:
         run: |
           cd $KERNEL_DIR
           
-          # 添加 Clang 17 编译标志
-          EXTRA_CFLAGS="-mllvm -polly -mllvm -polly-vectorizer=stripmine"
+          # 添加Clang优化标志（仅在编译阶段）
+          EXTRA_CFLAGS="-Qunused-arguments -fno-addrsig -mllvm -polly -mllvm -polly-vectorizer=stripmine"
           
           time make O=$OUT_DIR -j$(nproc --all) \
             CC="$CC" \
@@ -114,7 +117,6 @@ jobs:
             OBJCOPY="$OBJCOPY" \
             OBJDUMP="$OBJDUMP" \
             STRIP="$STRIP" \
-            CLANG_FLAGS="$CLANG_FLAGS" \
             EXTRA_CFLAGS="$EXTRA_CFLAGS" \
             2>&1 | tee build.log
           
@@ -138,7 +140,7 @@ jobs:
           # 复制主要产物
           cp $OUT_DIR/arch/arm64/boot/Image.gz-dtb $RELEASE_DIR/
           
-          # 复制所有 DTB 文件
+          # 复制所有DTB文件
           find $OUT_DIR/arch/arm64/boot/dts -name "*.dtb" -exec cp {} $RELEASE_DIR/ \;
           
           # 复制模块
