@@ -18,6 +18,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison flex libelf-dev libssl-dev ccache
+          # 关键修复：安装交叉编译工具链
+          sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
 
       - name: Set up Clang Toolchain
         run: |
@@ -28,17 +30,35 @@ jobs:
           ARCH: arm64
           CLANG_PATH: ${{ github.workspace }}/clang/bin
           CROSS_COMPILE: aarch64-linux-gnu-
-          DEFCONFIG: marble_defconfig  # 替换为你的配置文件名称
+          DEFCONFIG: marble_defconfig
         run: |
-          export PATH=$CLANG_PATH:$PATH
-          make O=out $DEFCONFIG
-          make -j$(nproc) O=out \
-            CC="clang" \
-            LD="ld.lld" \
-            AR="llvm-ar" \
-            NM="llvm-nm" \
-            CLANG_TRIPLE="aarch64-linux-gnu-" \
-            CROSS_COMPILE="$CROSS_COMPILE"
+          export PATH=$CLANG_PATH:/usr/bin:$PATH
+          # 关键修复：设置完整的LLVM工具链
+          export REAL_CROSS_COMPILE=aarch64-linux-gnu-
+          
+          # 配置阶段
+          make O=out $DEFCONFIG LLVM=1 LLVM_IAS=1 \
+            CC=clang \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=$REAL_CROSS_COMPILE
+
+          # 编译阶段
+          make -j$(nproc) O=out LLVM=1 LLVM_IAS=1 \
+            CC=clang \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=$REAL_CROSS_COMPILE
 
       - name: Pack with AnyKernel3
         run: |
