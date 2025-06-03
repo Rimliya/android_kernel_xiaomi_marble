@@ -1,4 +1,4 @@
-name: Build Melt Kernel for Marble
+name: Build Melt Kernel for Marble (Clang 17)
 
 on:
   push:
@@ -24,37 +24,40 @@ jobs:
       - name: Install Build Dependencies
         run: |
           sudo apt-get update -y
-          
-          # 先安装基础工具链
           sudo apt-get install -y \
             bc bison build-essential ccache curl flex \
             git gnupg gperf \
             libelf-dev libffi-dev liblz4-tool \
-            libncurses-dev libncurses5 \
-            libsdl1.2-dev libssl-dev libxml2 libxml2-utils \
-            llvm lld clang lzop pngcrush python3 python3-pip \
-            rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
-            device-tree-compiler
-          
-          # 单独安装交叉编译工具链（避免冲突）
-          sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+            libncurses-dev \
+            libssl-dev libxml2 libxml2-utils \
+            llvm lld lzop python3 python3-pip \
+            rsync squashfs-tools zip zlib1g-dev \
+            device-tree-compiler \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
           
           pip3 install pycryptodome
 
-      - name: Setup Clang Toolchain
+      - name: Setup Clang 17 Toolchain
         run: |
-          CLANG_VERSION="14.0.6"
-          CLANG_ARCHIVE="clang+llvm-${CLANG_VERSION}-x86_64-linux-gnu-ubuntu-18.04.tar.xz"
+          # 使用 Clang 17.0.6 (最新稳定版)
+          CLANG_VERSION="17.0.6"
+          ARCHIVE_NAME="clang+llvm-${CLANG_VERSION}-x86_64-linux-gnu-ubuntu-22.04.tar.xz"
           
-          wget -q "https://github.com/llvm/llvm-project/releases/download/llvmorg-${CLANG_VERSION}/${CLANG_ARCHIVE}"
+          # 从清华镜像下载（更快更可靠）
+          MIRROR_URL="https://mirrors.tuna.tsinghua.edu.cn/github-release/llvm/llvm-project/LatestRelease"
+          wget -q --tries=3 --timeout=30 "${MIRROR_URL}/${ARCHIVE_NAME}" || \
+          wget -q --tries=3 --timeout=30 "https://github.com/llvm/llvm-project/releases/download/llvmorg-${CLANG_VERSION}/${ARCHIVE_NAME}"
           
-          sudo mkdir -p /usr/local/clang-llvm
-          sudo tar -xf ${CLANG_ARCHIVE} -C /usr/local/clang-llvm --strip-components=1
+          # 安装到工作目录
+          mkdir -p clang-17
+          tar -xf "${ARCHIVE_NAME}" -C clang-17 --strip-components=1
           
-          echo "/usr/local/clang-llvm/bin" | sudo tee -a /etc/environment
-          echo "LD_LIBRARY_PATH=/usr/local/clang-llvm/lib:$LD_LIBRARY_PATH" | sudo tee -a /etc/environment
+          # 设置环境变量
+          echo "$(pwd)/clang-17/bin" >> $GITHUB_PATH
+          echo "LD_LIBRARY_PATH=$(pwd)/clang-17/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
           
-          /usr/local/clang-llvm/bin/clang --version
+          # 验证安装
+          clang-17/bin/clang --version
 
       - name: Prepare Build Environment
         run: |
@@ -73,12 +76,13 @@ jobs:
           OBJCOPY=llvm-objcopy
           OBJDUMP=llvm-objdump
           STRIP=llvm-strip
-          PATH=/usr/local/clang-llvm/bin:$PATH
           KERNEL_DIR=$GITHUB_WORKSPACE/kernel_source
           OUT_DIR=$GITHUB_WORKSPACE/out
           KBUILD_BUILD_USER=GitHubActions
           KBUILD_BUILD_HOST=CI-Server
           CCACHE_DIR=$GITHUB_WORKSPACE/.ccache
+          # 添加Clang特定标志（针对Android内核）
+          CLANG_FLAGS="-Qunused-arguments -fno-addrsig"
           EOF
           
           ccache --max-size=2G
@@ -89,11 +93,31 @@ jobs:
           make O=$OUT_DIR clean
           make O=$OUT_DIR mrproper
           make O=$OUT_DIR marble_defconfig
+          
+          # 可选：添加Clang 17特定配置
+          ./scripts/config --file $OUT_DIR/.config \
+            -e LTO_CLANG_THIN \
+            -e THINLTO \
+            -d LTO_NONE
 
-      - name: Compile Kernel
+      - name: Compile Kernel with Clang 17
         run: |
           cd $KERNEL_DIR
-          time make O=$OUT_DIR -j$(nproc --all) 2>&1 | tee build.log
+          
+          # 添加Clang 17特定编译标志
+          EXTRA_CFLAGS="-mllvm -polly -mllvm -polly-vectorizer=stripmine"
+          
+          time make O=$OUT_DIR -j$(nproc --all) \
+            CC="$CC" \
+            LD="$LD" \
+            AR="$AR" \
+            NM="$NM" \
+            OBJCOPY="$OBJCOPY" \
+            OBJDUMP="$OBJDUMP" \
+            STRIP="$STRIP" \
+            CLANG_FLAGS="$CLANG_FLAGS" \
+            EXTRA_CFLAGS="$EXTRA_CFLAGS" \
+            2>&1 | tee build.log
           
           # 验证核心产物存在
           if [ ! -f "$OUT_DIR/arch/arm64/boot/Image.gz-dtb" ]; then
@@ -115,9 +139,11 @@ jobs:
           # 复制主要产物
           cp $OUT_DIR/arch/arm64/boot/Image.gz-dtb $RELEASE_DIR/
           
-          # 尝试复制其他可能存在的文件
-          find $OUT_DIR/arch/arm64/boot -name "*.dtb" -exec cp {} $RELEASE_DIR/ \;
-          [ -f "$OUT_DIR/arch/arm64/boot/dtbo.img" ] && cp $OUT_DIR/arch/arm64/boot/dtbo.img $RELEASE_DIR/
+          # 复制所有DTB文件
+          find $OUT_DIR/arch/arm64/boot/dts -name "*.dtb" -exec cp {} $RELEASE_DIR/ \;
+          
+          # 复制模块
+          find $OUT_DIR -name "*.ko" -exec cp {} $RELEASE_DIR/ \;
           
           # 复制调试文件
           cp $OUT_DIR/vmlinux $RELEASE_DIR/
@@ -129,6 +155,6 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: MeltKernel-marble-${{ github.run_id }}
+          name: MeltKernel-marble-Clang17-${{ github.run_id }}
           path: $GITHUB_WORKSPACE/release
           retention-days: 7
